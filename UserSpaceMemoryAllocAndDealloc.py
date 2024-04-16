@@ -1,6 +1,34 @@
 #!/usr/bin/python
 from bcc import BPF
 
+import mysql.connector
+from mysql.connector import Error
+
+db_config = {
+    'host': 'localhost',
+    'user': 'grafana',
+    'password': 'bmscecollege',
+    'database': 'grafanadb'
+}
+
+def insert_into_mysql(address, alloc_count, free_count):
+    conn = None  # Initialize conn to None before the try block
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+        insert_query = """
+        INSERT INTO User_Space_Memory_Alloc_And_Dealloc (address, alloc_count, free_count)
+        VALUES (%s, %s, %s)
+        """
+        cursor.execute(insert_query, (address, alloc_count, free_count))
+        conn.commit()
+    except Error as e:
+        print(f"Error: {e}")
+    finally:
+        if conn and conn.is_connected():  # Check if conn is not None and is connected before closing
+            cursor.close()
+            conn.close()
+
 # eBPF program definition
 bpf_text = """
 #include <uapi/linux/ptrace.h>
@@ -50,16 +78,24 @@ try:
     while True:
         print("Allocations:")
         for addr, count in allocs.items():
-            address = int.from_bytes(addr, byteorder='little') # Convert bytes to int
-            print("Address: 0x%x, Count: %d" % (address, count.value))
+            address = int.from_bytes(addr, byteorder='little')  # Convert bytes to int
+            alloc_count = count.value
+            print("Address: 0x%x, Count: %d" % (address, alloc_count))
+            # Initialize free_count to 0, update later if applicable
+            insert_into_mysql(address, alloc_count, 0)
+        
         print("\nDeallocations:")
         for addr, count in frees.items():
-            address = int.from_bytes(addr, byteorder='little') # Convert bytes to int
-            print("Address: 0x%x, Count: %d" % (address, count.value))
+            address = int.from_bytes(addr, byteorder='little')  # Convert bytes to int
+            free_count = count.value
+            print("Address: 0x%x, Count: %d" % (address, free_count))
+            # Attempt to update existing records with free_count
+            insert_into_mysql(address, 0, free_count)
+        
         print("------------------------------------------------------------")
         allocs.clear()
         frees.clear()
-        b.perf_buffer_poll()
+        # b.perf_buffer_poll() is not needed here unless you're using perf buffers
 
 except KeyboardInterrupt:
     print("Tracing stopped.")

@@ -22,6 +22,25 @@ import argparse
 from bcc import BPF, PerfType, PerfHWConfig
 import signal
 from time import sleep
+import mysql.connector  # Import the MySQL connector
+
+# Your MySQL database credentials
+db_config = {
+    'user': 'grafana',
+    'password': 'bmscecollege',
+    'host': 'localhost',
+    'database': 'grafanadb',
+    'raise_on_warnings': True,
+}
+
+# Connect to the database
+try:
+    db_conn = mysql.connector.connect(**db_config)
+    cursor = db_conn.cursor()
+except mysql.connector.Error as err:
+    print(f"Failed to connect to database: {err}")
+    exit()
+
 
 parser = argparse.ArgumentParser(
     description="Summarize cache references and misses by PID",
@@ -38,6 +57,23 @@ parser.add_argument(
 parser.add_argument("--ebpf", action="store_true",
     help=argparse.SUPPRESS)
 args = parser.parse_args()
+
+def insert_into_mysql(data, is_tid):
+    insert_query = """
+    INSERT INTO cache_stats (pid, tid, name, cpu, reference, misses, hit_rate)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+    for (pid, tid, name, cpu), references in data.items():
+        misses = miss_count.get((pid, tid, cpu, name), 0)
+        hit_rate = (float(references - misses) / float(references)) * 100.0 if references > 0 else 0
+        print((pid, tid, name, cpu, references, misses, hit_rate))  # Debugging line to verify the corrected structure
+        try:
+            cursor.execute(insert_query, (pid, tid, name, cpu, references, misses, hit_rate))
+            db_conn.commit()
+        except mysql.connector.Error as err:
+            print(f"Failed to insert data into database: {err}")
+            db_conn.rollback()
+
 
 # load BPF program
 bpf_text="""
@@ -145,5 +181,6 @@ for (k, v) in b.get_table('ref_count').items():
         print(format_text.format(
             k.pid, k.name.decode('utf-8', 'replace'), k.cpu, v.value, miss,
             (float(hit) / float(v.value)) * 100.0))
-print('Total References: {} Total Misses: {} Hit Rate: {:.2f}%'.format(
-    tot_ref, tot_miss, (float(tot_ref - tot_miss) / float(tot_ref)) * 100.0))
+insert_into_mysql({(k.pid, k.tid, k.name.decode('utf-8', 'replace'), k.cpu): v.value for k, v in b.get_table('ref_count').items()}, args.tid)
+cursor.close()
+db_conn.close()
